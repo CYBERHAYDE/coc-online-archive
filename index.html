@@ -243,14 +243,14 @@
        just laid out to fit the space (this is what actually fixes the "still phone-sized"
        feel without shrinking or blurring anything). */
     #memberResults, #visitorResults, #prospectResults, #congResults,
-    #absenteeResults, #serviceAbsenteeResults, #bulletinResults{
+    #absenteeResults, #serviceAbsenteeResults, #bulletinResults, #announcementResults{
       display:grid;
       grid-template-columns:repeat(auto-fill, minmax(280px,1fr));
       gap:12px;
       align-items:start;
     }
     #memberResults .card, #visitorResults .card, #prospectResults .card, #congResults .card,
-    #absenteeResults .card, #serviceAbsenteeResults .card, #bulletinResults .card{
+    #absenteeResults .card, #serviceAbsenteeResults .card, #bulletinResults .card, #announcementResults .card{
       margin-bottom:0;
     }
     .snapshot-grid{ grid-template-columns:repeat(auto-fit, minmax(200px,1fr)); }
@@ -406,6 +406,17 @@
     <div id="congResults"></div>
   </section>
 
+  <!-- ANNOUNCEMENTS SCREEN (admin only) — pop-ups shown to everyone when the app opens -->
+  <section class="screen" id="screen-announcements">
+    <div class="searchbar">
+      <input type="text" id="announcementSearch" placeholder="Search pop-ups by title...">
+      <button class="btn ghost" onclick="loadAll(true)" title="Refresh">⟳</button>
+      <button class="btn" onclick="openAnnouncementForm(null)">+ Add</button>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin:-4px 0 12px;">Active pop-ups appear once to each visitor when they open the app. Editing one shows it again, even to people who already saw the old version.</div>
+    <div id="announcementResults"></div>
+  </section>
+
   <!-- BULLETIN SCREEN -->
   <section class="screen" id="screen-bulletin">
     <div class="searchbar">
@@ -481,6 +492,7 @@
     <button class="btn ghost block" style="margin-top:14px;" onclick="goToFromMore('attendance')">Attendance</button>
     <button class="btn ghost block" style="margin-top:10px;" onclick="goToFromMore('visitors')">Visitors</button>
     <button class="btn ghost block" style="margin-top:10px;" onclick="goToFromMore('prospects')">Prospects</button>
+    <button class="btn ghost block" style="margin-top:10px;" onclick="goToFromMore('announcements')">Pop-ups &amp; Announcements</button>
     <button class="btn ghost block" style="margin-top:10px;" onclick="goToFromMore('reports')">Reports &amp; Analysis</button>
   </div>
 </div>
@@ -615,7 +627,7 @@ function maybeShowWalkthrough() {
 
 
 /* ============ STATE ============ */
-let cache = { Members: [], Attendance: [], Visitors: [], Prospects: [], Congregations: [] };
+let cache = { Members: [], Attendance: [], Visitors: [], Prospects: [], Congregations: [], Announcements: [] };
 
 /* ============ OFFLINE QUEUE ============ */
 // Anything added/edited while offline gets stored here and replayed
@@ -716,6 +728,7 @@ function showScreen(name) {
   }
   if (name === "reports") renderSnapshot();
   if (name === "congregations") renderCongList();
+  if (name === "announcements") renderAnnouncementsList();
   if (name === "bulletin") loadBulletin();
 }
 function showScreenByName(name) { showScreen(name); }
@@ -754,7 +767,18 @@ async function loadAll(manual) {
     renderList("Visitors");
     renderList("Prospects");
     renderCongList();
+    // Announcements are fetched separately and defensively — if the "Announcements" tab
+    // doesn't exist yet in your Google Sheet, this fails quietly instead of taking the
+    // rest of the app offline.
+    try {
+      const ann = await apiGet("getAll", "Announcements");
+      cache.Announcements = ann.data || [];
+    } catch (err) {
+      // leave cache.Announcements as whatever it was last (empty on first run)
+    }
+    renderAnnouncementsList();
     checkPopups();
+    checkBulletinForNewPost();
     hideSplash();
   } catch (err) {
     setSync("Offline — showing last saved data");
@@ -785,6 +809,8 @@ function renderBulletin(json) {
   const container = document.getElementById("bulletinResults");
   const entries = (json && json.feed && json.feed.entry) || [];
   if (entries.length === 0) { container.innerHTML = `<div class="empty">No posts found yet</div>`; return; }
+  const latestLinkObj = (entries[0].link || []).find(l => l.rel === "alternate");
+  if (latestLinkObj) localStorage.setItem(BULLETIN_LAST_SEEN_KEY, latestLinkObj.href);
   container.innerHTML = entries.map(entry => {
     const title = (entry.title && entry.title.$t) || "(untitled post)";
     const published = entry.published ? new Date(entry.published.$t).toLocaleDateString([], {month:"short", day:"numeric", year:"numeric"}) : "";
@@ -905,6 +931,108 @@ function openCongForm(id) {
   document.getElementById("detailOverlay").classList.add("show");
 }
 
+/* ============ ANNOUNCEMENTS (ADMIN-MANAGED POP-UPS) ============ */
+// Admins create/edit/delete these; they're shown as a pop-up to everyone (admin or
+// member) the next time they open the app — see checkPopups()/enqueuePopup() below.
+function renderAnnouncementsList(filterText) {
+  const container = document.getElementById("announcementResults");
+  if (!container) return;
+  let rows = cache.Announcements || [];
+  if (filterText) {
+    const q = filterText.toLowerCase();
+    rows = rows.filter(r => (r.Title||"").toLowerCase().includes(q));
+  }
+  if (rows.length === 0) {
+    container.innerHTML = `<div class="empty">${filterText ? "No match found" : "No pop-ups yet — tap + Add to create one"}</div>`;
+    return;
+  }
+  container.innerHTML = rows.map(r => {
+    const isActive = (r.Active || "Yes") !== "No";
+    const msg = r.Message || "";
+    return `
+    <div class="card" onclick='openAnnouncementDetail(${JSON.stringify(r.ID)})'>
+      <div class="name">${r.Title || "(no title)"}</div>
+      <div class="meta">${msg.slice(0,80)}${msg.length>80?"...":""}</div>
+      <span class="tag" style="${isActive ? "" : "background:#FCEBEC;color:var(--red);"}">${isActive ? "Active" : "Inactive"}</span>
+    </div>`;
+  }).join("");
+}
+
+function openAnnouncementDetail(id) {
+  const r = (cache.Announcements||[]).find(a => String(a.ID) === String(id));
+  if (!r) return;
+  const isActive = (r.Active || "Yes") !== "No";
+  document.getElementById("detailSheet").innerHTML = `
+    <button class="close-x" onclick="closeDetail()">&times;</button>
+    <h2>${r.Title || "(no title)"}</h2>
+    <p style="color:var(--muted);font-size:13px;margin-top:0;">${isActive ? "Active — shown to everyone who hasn't seen this version yet" : "Inactive — not shown to anyone"}</p>
+    <div style="font-size:14px;color:var(--text);background:var(--bg);border-radius:10px;padding:12px;white-space:pre-wrap;">${r.Message || ""}</div>
+    <button class="btn ghost block" style="margin-top:14px;" onclick='openAnnouncementForm("${r.ID}")'>Edit details</button>
+    <button class="btn red block" style="margin-top:10px;" onclick='confirmDelete("Announcements", "${r.ID}", ${JSON.stringify(r.Title||"this pop-up")})'>Delete pop-up</button>
+  `;
+  document.getElementById("detailOverlay").classList.add("show");
+}
+
+function openAnnouncementForm(id) {
+  const existing = id ? (cache.Announcements||[]).find(a => String(a.ID)===String(id)) : {};
+  document.getElementById("detailSheet").innerHTML = `
+    <button class="close-x" onclick="closeDetail()">&times;</button>
+    <h2>${id ? "Edit" : "Add"} pop-up</h2>
+    <form id="announcementForm">
+      <div class="field"><label>Title</label><input type="text" name="Title" value="${existing.Title||""}" required></div>
+      <div class="field"><label>Message</label><textarea name="Message" rows="4" style="resize:vertical;">${existing.Message||""}</textarea></div>
+      <div class="field"><label>Status</label>
+        <select name="Active">
+          <option value="Yes" ${(existing.Active||"Yes")==="Yes" ? "selected":""}>Active — show to everyone</option>
+          <option value="No" ${existing.Active==="No" ? "selected":""}>Inactive — hidden</option>
+        </select>
+      </div>
+      <div class="row-actions">
+        <button type="button" class="btn ghost block" onclick="closeDetail()">Cancel</button>
+        <button type="submit" class="btn block">Save</button>
+      </div>
+    </form>
+  `;
+  document.getElementById("announcementForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const data = {
+      Title: e.target.Title.value,
+      Message: e.target.Message.value,
+      Active: e.target.Active.value,
+      Rev: String(Date.now()) // bumped on every save so anyone who already saw the old version sees this update
+    };
+    setSync("Saving...");
+    const displayName = data.Title || "pop-up";
+    let result;
+    if (id) {
+      result = await apiPost(
+        { action:"update", sheet:"Announcements", id, data, adminName:getAdminName() },
+        () => { Object.assign((cache.Announcements||[]).find(a=>String(a.ID)===String(id))||{}, data); renderAnnouncementsList(); }
+      );
+    } else {
+      const tempId = "pending-" + Date.now();
+      result = await apiPost(
+        { action:"add", sheet:"Announcements", data, adminName:getAdminName() },
+        () => { cache.Announcements.push({ ID: tempId, ...data }); renderAnnouncementsList(); }
+      );
+    }
+    if (result.offline) {
+      setSync("Saved offline — will sync when back online");
+      showToast(`Saved offline — ${displayName} will sync when back online`);
+    } else if (result && result.success === false) {
+      setSync("Save failed");
+      showToast(`Couldn't save ${displayName} — please try again`, { error:true });
+      await loadAll();
+    } else {
+      setSync("Saved");
+      showToast(`${id ? "Updated" : "Added"} ${displayName} ✅`);
+      loadAll();
+    }
+    closeDetail();
+  });
+  document.getElementById("detailOverlay").classList.add("show");
+}
+
 /* ============ SEARCH + LIST RENDER ============ */
 function fullName(r){ return ((r.FirstName||"") + " " + (r.Surname||"")).trim(); }
 function memberDisplayName(r) {
@@ -978,6 +1106,7 @@ function refreshDeptFilterOptions() {
   });
 });
 document.getElementById("congSearch").addEventListener("input", (e) => renderCongList(e.target.value));
+document.getElementById("announcementSearch").addEventListener("input", (e) => renderAnnouncementsList(e.target.value));
 
 /* ============ DETAIL / MARK / EDIT ============ */
 function findRecord(sheet, id) {
@@ -1115,6 +1244,7 @@ function confirmDelete(sheet, id, name) {
 function getDisplayName(sheet, record) {
   if (!record) return "record";
   if (sheet === "Congregations") return record.Name || "congregation";
+  if (sheet === "Announcements") return record.Title || "pop-up";
   if (sheet === "Attendance") return "attendance entry";
   return fullName(record) || "record";
 }
@@ -1125,7 +1255,14 @@ async function deleteRecord(sheet, id) {
   setSync("Deleting...");
   const result = await apiPost(
     { action:"delete", sheet, id, adminName: getAdminName() },
-    () => { cache[sheet] = (cache[sheet]||[]).filter(r => String(r.ID) !== String(id)); renderList(sheet); }
+    () => {
+      cache[sheet] = (cache[sheet]||[]).filter(r => String(r.ID) !== String(id));
+      // Congregations/Announcements use their own dedicated render functions rather
+      // than the generic renderList() (which only knows Members/Visitors/Prospects).
+      if (sheet === "Congregations") renderCongList();
+      else if (sheet === "Announcements") renderAnnouncementsList();
+      else renderList(sheet);
+    }
   );
   if (result.offline) {
     setSync("Delete saved offline — will sync when back online");
@@ -1468,30 +1605,150 @@ function renderAnalysis() {
   barChart("genderChart", genderRows);
 }
 
-/* ============ POPUPS: BIRTHDAYS + ABSENTEE ALERTS ============ */
-const POPUP_SHOWN_KEY = "coc_popup_shown_date";
-function checkPopups() {
-  const today = new Date();
-  const todayKey = today.toISOString().slice(0,10);
-  if (sessionStorage.getItem(POPUP_SHOWN_KEY) === todayKey) return; // already shown today — don't reopen on every silent background refresh
-  const mm = today.getMonth()+1, dd = today.getDate();
-  const upcoming = cache.Members.filter(m => {
-    if (!m.Birthdate) return false;
-    const d = new Date(m.Birthdate);
-    const diff = (new Date(today.getFullYear(), d.getMonth(), d.getDate()) - new Date(today.getFullYear(), today.getMonth(), today.getDate())) / 86400000;
-    return diff >= 0 && diff <= 7;
-  });
-  if (upcoming.length > 0) {
-    sessionStorage.setItem(POPUP_SHOWN_KEY, todayKey);
-    document.getElementById("popupBody").innerHTML = `
-      <h3>🎉 Birthdays this week</h3>
-      ${upcoming.map(m => `<p>${fullName(m)}</p>`).join("")}
-      <button class="btn block" style="margin-top:12px;" onclick="closePopup()">Got it</button>
-    `;
-    document.getElementById("popupOverlay").classList.add("show");
+/* ============ POPUP QUEUE: ANNOUNCEMENTS + BIRTHDAYS + NEW BULLETIN POSTS ============ */
+// Everything that wants to interrupt the user with a pop-up (admin announcements,
+// birthday alerts, "new post on the blog") goes through this shared queue instead of
+// fighting over the one popup overlay — items are shown one at a time, in the order
+// they were queued, and each is only shown once until it changes (Rev bump) or a new
+// day starts (birthdays).
+let popupQueue = [];
+let currentPopupItem = null;
+
+function enqueuePopup(item) {
+  popupQueue.push(item);
+  if (!document.getElementById("popupOverlay").classList.contains("show")) {
+    showNextPopup();
   }
 }
-function closePopup(){ document.getElementById("popupOverlay").classList.remove("show"); }
+function showNextPopup() {
+  if (popupQueue.length === 0) return;
+  currentPopupItem = popupQueue.shift();
+  renderPopup(currentPopupItem);
+}
+function renderPopup(p) {
+  const body = document.getElementById("popupBody");
+  if (p.type === "announcement") {
+    body.innerHTML = `
+      <h3>📢 ${p.title}</h3>
+      <p style="white-space:pre-wrap;">${p.message}</p>
+      <button class="btn block" style="margin-top:12px;" onclick="handlePopupAck()">Got it</button>
+    `;
+  } else if (p.type === "bulletin") {
+    body.innerHTML = `
+      <h3>📰 New post on the church blog</h3>
+      <p>${p.title}</p>
+      <div style="display:flex;gap:10px;margin-top:12px;">
+        <button class="btn ghost block" onclick="handlePopupAck()">Later</button>
+        <button class="btn block" onclick="handlePopupRead()">Read now</button>
+      </div>
+    `;
+  } else if (p.type === "birthday") {
+    body.innerHTML = `
+      <h3>🎉 Birthdays this week</h3>
+      ${p.names.map(n => `<p>${n}</p>`).join("")}
+      <button class="btn block" style="margin-top:12px;" onclick="handlePopupAck()">Got it</button>
+    `;
+  }
+  document.getElementById("popupOverlay").classList.add("show");
+}
+function handlePopupAck() {
+  if (currentPopupItem && currentPopupItem.onAck) currentPopupItem.onAck();
+  closePopup();
+}
+function handlePopupRead() {
+  if (currentPopupItem) {
+    if (currentPopupItem.onAck) currentPopupItem.onAck();
+    if (currentPopupItem.link) window.open(currentPopupItem.link, "_blank");
+  }
+  closePopup();
+}
+function closePopup(){
+  document.getElementById("popupOverlay").classList.remove("show");
+  currentPopupItem = null;
+  setTimeout(showNextPopup, 250); // brief pause so the next pop-up doesn't feel like it's cutting in
+}
+
+const POPUP_SHOWN_KEY = "coc_popup_shown_date";
+function checkPopups() {
+  // Admin-configured announcements — each is keyed by ID + Rev, so editing one
+  // (which bumps Rev) makes it show again even to people who already dismissed it.
+  (cache.Announcements || []).forEach(a => {
+    if ((a.Active || "Yes") === "No") return;
+    const seenKey = "coc_ann_seen_" + a.ID + "_" + (a.Rev || "");
+    if (localStorage.getItem(seenKey) === "yes") return;
+    enqueuePopup({
+      type: "announcement",
+      title: a.Title || "Announcement",
+      message: a.Message || "",
+      onAck: () => localStorage.setItem(seenKey, "yes")
+    });
+  });
+
+  // Birthdays this week — once per calendar day, not on every silent background refresh.
+  const today = new Date();
+  const todayKey = today.toISOString().slice(0,10);
+  if (sessionStorage.getItem(POPUP_SHOWN_KEY) !== todayKey) {
+    const upcoming = cache.Members.filter(m => {
+      if (!m.Birthdate) return false;
+      const d = new Date(m.Birthdate);
+      const diff = (new Date(today.getFullYear(), d.getMonth(), d.getDate()) - new Date(today.getFullYear(), today.getMonth(), today.getDate())) / 86400000;
+      return diff >= 0 && diff <= 7;
+    });
+    if (upcoming.length > 0) {
+      enqueuePopup({
+        type: "birthday",
+        names: upcoming.map(fullName),
+        onAck: () => sessionStorage.setItem(POPUP_SHOWN_KEY, todayKey)
+      });
+    }
+  }
+}
+
+/* ============ AUTO-ALERT: NEW BULLETIN POST ============ */
+// Silently checks the church blog's latest post against what was last seen (on this
+// device) and, if it's new, queues a pop-up and fires a browser notification.
+const BULLETIN_LAST_SEEN_KEY = "coc_bulletin_last_seen_link";
+function checkBulletinForNewPost() {
+  window.__handleBulletinCheck = (json) => {
+    const entries = (json && json.feed && json.feed.entry) || [];
+    if (entries.length === 0) return;
+    const latest = entries[0];
+    const linkObj = (latest.link || []).find(l => l.rel === "alternate");
+    const link = linkObj ? linkObj.href : "https://cocigbogbo.blogspot.com/";
+    const title = (latest.title && latest.title.$t) || "New post";
+    const lastSeen = localStorage.getItem(BULLETIN_LAST_SEEN_KEY);
+    if (lastSeen && lastSeen !== link) {
+      enqueuePopup({
+        type: "bulletin",
+        title,
+        link,
+        onAck: () => localStorage.setItem(BULLETIN_LAST_SEEN_KEY, link)
+      });
+      fireBulletinNotification(title);
+    } else if (!lastSeen) {
+      // first time ever checking on this device — remember it, don't announce retroactively
+      localStorage.setItem(BULLETIN_LAST_SEEN_KEY, link);
+    }
+  };
+  const existing = document.getElementById("bulletinCheckScript");
+  if (existing) existing.remove();
+  const script = document.createElement("script");
+  script.id = "bulletinCheckScript";
+  script.src = "https://cocigbogbo.blogspot.com/feeds/posts/default?alt=json-in-script&callback=__handleBulletinCheck&max-results=1";
+  script.onerror = () => {}; // silent — this is a background check, not a user-facing action
+  document.body.appendChild(script);
+}
+function fireBulletinNotification(title) {
+  if (!("Notification" in window)) return; // not supported on this browser — pop-up above still shows
+  if (Notification.permission === "granted") {
+    try { new Notification("New post on the church blog", { body: title, icon: "icon-192.png" }); } catch(e) {}
+  }
+}
+function maybeRequestNotificationPermission() {
+  if ("Notification" in window && Notification.permission === "default") {
+    Notification.requestPermission().catch(()=>{});
+  }
+}
 
 /* ============ INIT ============ */
 if ("serviceWorker" in navigator) {
@@ -1516,6 +1773,7 @@ if ("serviceWorker" in navigator) {
 loadAll();
 updateQueueBadge();
 checkLock(); // called here, not earlier, so every const it can reach (forms, walkthrough, etc.) already exists
+maybeRequestNotificationPermission();
 
 // Refresh the moment the phone gets signal back — flushQueue() above already
 // runs first (registered separately), this pulls fresh data right after.
